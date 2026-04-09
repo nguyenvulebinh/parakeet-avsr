@@ -52,3 +52,7 @@ outputs/
 results/
 *.vtt
 
+
+# Examples
+examples/*_full*
+debug/*

@@ -145,13 +145,14 @@ class AVASRForTranscription(PreTrainedModel):
 
     @torch.no_grad()
     def transcribe(self, av_path: str | Path) -> str:
-        from src.avasr.io.audio_loader import load_audio
+        from src.avasr.io.audio_loader import AUDIO_SAMPLE_RATE, load_audio
         from src.avasr.io.video_loader import load_video_frames
         from src.avasr.vision.visual_features import get_visual_feats
 
         device = self.device
-        audio = load_audio(av_path).to(device)
         _, lip_frames, _ = load_video_frames(av_path)
+        sync_samples = max(1, int(round(lip_frames.shape[0] * AUDIO_SAMPLE_RATE / 25)))
+        audio = load_audio(av_path, fallback_num_samples=sync_samples).to(device)
         video_batch = lip_frames.unsqueeze(0).to(device)
         video_lengths = torch.tensor([lip_frames.shape[0]], dtype=torch.int64, device=device)
         num_speakers = torch.tensor([1], dtype=torch.int64, device=device)
