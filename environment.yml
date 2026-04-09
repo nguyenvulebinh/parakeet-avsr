@@ -1,0 +1,9 @@
+name: avasr
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10.12
+  - ffmpeg
+  - pip
+  - pip:
+      - -r requirements.txt
