@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, TextIO
 
 import torch
 from transformers.utils.hub import cached_file
@@ -11,12 +11,7 @@ from transformers.utils.hub import cached_file
 from src.avasr.core.modeling import AVASRForTranscription
 from src.avasr.io.audio_loader import AUDIO_SAMPLE_RATE, load_audio
 from src.avasr.io.face_model_hub import ensure_face_weights
-from src.avasr.io.video_loader import (
-    LipCropMode,
-    load_video_frames,
-    probe_first_frame_is_lip_resolution,
-    resolve_uem_time_range,
-)
+from src.avasr.io.video_loader import LipCropMode, load_video_frames, resolve_uem_time_range
 from src.model_bin_root import set_model_bin_root
 from src.avasr.pipeline.timestamps import MS_PER_FRAME, compute_word_timestamps, format_vtt_ts
 from src.avasr.vision.visual_features import get_visual_feats
@@ -118,15 +113,149 @@ def transcribe_file(
     return text, word_ts
 
 
-def write_vtt(f, word_timestamps: list[dict], time_offset: float = 0.0):
-    f.write("WEBVTT\n\n")
+def _word_timestamps_to_sec_rows(
+    word_timestamps: list[dict], time_offset: float
+) -> list[tuple[str, float, float]]:
+    rows: list[tuple[str, float, float]] = []
     for winfo in word_timestamps:
         word = winfo["word"].strip()
-        if word and word != "<unk>":
-            start_sec = time_offset + winfo["start_offset"] * MS_PER_FRAME
-            end_sec = time_offset + winfo["end_offset"] * MS_PER_FRAME
-            f.write(f"{format_vtt_ts(start_sec)} --> {format_vtt_ts(end_sec)}\n")
-            f.write(f"{word}\n\n")
+        if not word or word == "<unk>":
+            continue
+        t0 = time_offset + winfo["start_offset"] * MS_PER_FRAME
+        t1 = time_offset + winfo["end_offset"] * MS_PER_FRAME
+        rows.append((word, t0, t1))
+    return rows
+
+
+def _merge_words_into_utterances(
+    words: list[tuple[str, float, float]],
+    merge_gap_sec: float,
+    max_utterance_sec: float,
+) -> list[tuple[str, float, float]]:
+    """Group consecutive words into one cue if gap ≤ merge_gap_sec and span ≤ max_utterance_sec."""
+    if not words:
+        return []
+    merged: list[tuple[str, float, float]] = []
+    group: list[str] = [words[0][0]]
+    g_start, g_end = words[0][1], words[0][2]
+    for w, t0, t1 in words[1:]:
+        gap = t0 - g_end
+        span_if_added = t1 - g_start
+        if gap > merge_gap_sec or span_if_added > max_utterance_sec:
+            merged.append((" ".join(group), g_start, g_end))
+            group = [w]
+            g_start, g_end = t0, t1
+        else:
+            group.append(w)
+            g_end = t1
+    merged.append((" ".join(group), g_start, g_end))
+    return merged
+
+
+def write_vtt(
+    word_timestamps: list[dict],
+    f: TextIO | None = None,
+    time_offset: float = 0.0,
+    *,
+    merge_utterance: bool = True,
+    merge_gap_sec: float = 0.5,
+    max_utterance_sec: float = 10.0,
+) -> None:
+    """Write WebVTT from word-level timestamps (see :func:`compute_word_timestamps`).
+
+    If ``f`` is ``None`` (the default), writes to :data:`sys.stdout`.
+
+    When ``merge_utterance`` is True, adjacent words are merged into one cue if the
+    gap between them is at most ``merge_gap_sec`` (default 500 ms) and the cue span
+    would not exceed ``max_utterance_sec`` (default 10 s).
+    """
+    out = sys.stdout if f is None else f
+    out.write("WEBVTT\n\n")
+    rows = _word_timestamps_to_sec_rows(word_timestamps, time_offset)
+    if merge_utterance:
+        cues = _merge_words_into_utterances(rows, merge_gap_sec, max_utterance_sec)
+    else:
+        cues = rows
+    for text, start_sec, end_sec in cues:
+        out.write(f"{format_vtt_ts(start_sec)} --> {format_vtt_ts(end_sec)}\n")
+        out.write(f"{text}\n\n")
+
+
+class AVSRInference:
+    """Load AVSR, tokenizer, and lip (RetinaFace/FAN) pipeline once; call ``transcribe`` per file."""
+
+    def __init__(
+        self,
+        *,
+        model_id: str | Path,
+        cache_dir: str | Path,
+        device: torch.device,
+        face_hub_repo: str | None = None,
+    ) -> None:
+        self.cache_dir = Path(cache_dir).resolve()
+        self.device = device
+        self.model_id = str(model_id)
+        model_id_path = Path(model_id)
+
+        set_model_bin_root(self.cache_dir)
+
+        hub = (
+            face_hub_repo
+            if face_hub_repo is not None
+            else (str(model_id) if not model_id_path.exists() else DEFAULT_MODEL_ID)
+        )
+        ensure_face_weights(hub, cache_dir=self.cache_dir)
+        from src.retinaface.detector import LandmarksDetector
+        from src.retinaface.video_process import VideoProcess
+
+        self.landmarks_detector = LandmarksDetector(device=device_str_for_ibug(device))
+        self.video_process = VideoProcess(convert_gray=False)
+
+        self.model = AVASRForTranscription.from_pretrained(
+            self.model_id, cache_dir=str(self.cache_dir)
+        )
+        self.model.to(device).eval()
+
+        import sentencepiece as spm
+
+        tokenizer = spm.SentencePieceProcessor()
+        if model_id_path.exists():
+            tok_path = model_id_path / "tokenizer.model"
+        else:
+            tok_path = cached_file(
+                self.model_id,
+                "tokenizer.model",
+                cache_dir=str(self.cache_dir),
+            )
+            if tok_path is None:
+                raise FileNotFoundError(f"tokenizer.model not found for {self.model_id}")
+        tokenizer.load(str(tok_path))
+        self.tokenizer = tokenizer
+
+    @torch.no_grad()
+    def transcribe(
+        self,
+        av_path: str | Path,
+        *,
+        audio_path: Optional[str | Path] = None,
+        uem_start: Optional[float] = None,
+        uem_end: Optional[float] = None,
+        timestamps: bool = False,
+        lip_crop_mode: LipCropMode = "auto",
+    ) -> tuple[str, list[dict] | None]:
+        return transcribe_file(
+            self.model,
+            self.tokenizer,
+            av_path,
+            timestamps=timestamps,
+            audio_path=audio_path,
+            uem_start=uem_start,
+            uem_end=uem_end,
+            device=self.device,
+            lip_crop_mode=lip_crop_mode,
+            landmarks_detector=self.landmarks_detector,
+            video_process=self.video_process,
+        )
 
 
 def main():
@@ -179,8 +308,6 @@ def main():
         print(f"Error: file not found: {args.av_path}", file=sys.stderr)
         sys.exit(1)
 
-    set_model_bin_root(args.cache_dir.resolve())
-
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
     if args.force_lip_crop:
@@ -190,57 +317,19 @@ def main():
     else:
         lip_crop_mode = "auto"
 
-    probe_frame = max(0, int(args.uem_start * FPS)) if args.uem_start is not None else 0
-    need_lip_models = lip_crop_mode == "force" or (
-        lip_crop_mode == "auto"
-        and not probe_first_frame_is_lip_resolution(args.av_path, frame_index=probe_frame)
+    inference = AVSRInference(
+        model_id=args.model_id,
+        cache_dir=args.cache_dir,
+        device=device,
     )
-    model_id_path = Path(args.model_id)
-    face_hub_repo = str(args.model_id) if not model_id_path.exists() else DEFAULT_MODEL_ID
-    if need_lip_models:
-        ensure_face_weights(face_hub_repo, cache_dir=args.cache_dir.resolve())
 
-    landmarks_detector = None
-    video_process = None
-    if need_lip_models:
-        from src.retinaface.detector import LandmarksDetector
-        from src.retinaface.video_process import VideoProcess
-
-        landmarks_detector = LandmarksDetector(device=device_str_for_ibug(device))
-        video_process = VideoProcess(convert_gray=False)
-
-    model_source = str(args.model_id)
-    model = AVASRForTranscription.from_pretrained(model_source, cache_dir=str(args.cache_dir))
-    model.to(device).eval()
-
-    import sentencepiece as spm
-
-    tokenizer = spm.SentencePieceProcessor()
-    model_path = Path(args.model_id)
-    if model_path.exists():
-        tok_path = model_path / "tokenizer.model"
-    else:
-        tok_path = cached_file(
-            args.model_id,
-            "tokenizer.model",
-            cache_dir=str(args.cache_dir),
-        )
-        if tok_path is None:
-            raise FileNotFoundError(f"tokenizer.model not found for {args.model_id}")
-    tokenizer.load(str(tok_path))
-
-    text, word_ts = transcribe_file(
-        model,
-        tokenizer,
+    text, word_ts = inference.transcribe(
         args.av_path,
-        timestamps=args.timestamps,
         audio_path=args.audio,
         uem_start=args.uem_start,
         uem_end=args.uem_end,
-        device=device,
+        timestamps=args.timestamps,
         lip_crop_mode=lip_crop_mode,
-        landmarks_detector=landmarks_detector,
-        video_process=video_process,
     )
 
     time_offset = args.uem_start if args.uem_start is not None else 0.0
@@ -248,18 +337,13 @@ def main():
     if args.timestamps and word_ts:
         if args.output:
             with open(args.output, "w") as f:
-                write_vtt(f, word_ts, time_offset=time_offset)
+                write_vtt(word_ts, f, time_offset=time_offset)
             print(f"VTT written to {args.output}")
         else:
-            import io
-
-            buf = io.StringIO()
-            write_vtt(buf, word_ts, time_offset=time_offset)
-            print(buf.getvalue(), end="")
+            write_vtt(word_ts, time_offset=time_offset)
     else:
         if args.output:
             args.output.write_text(text)
             print(f"Text written to {args.output}")
         else:
             print(text)
-

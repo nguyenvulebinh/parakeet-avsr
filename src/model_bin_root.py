@@ -1,6 +1,6 @@
 """Shared root directory for on-disk checkpoints (AVSR + face alignment / detection).
 
-Set via :func:`set_model_bin_root` from CLI (e.g. ``--cache-dir`` in ``single``) so
+Set via :func:`set_model_bin_root` from CLI (e.g. ``--cache-dir`` in ``inference``) so
 ``ibug`` predictors and :mod:`src.avasr.io.face_model_hub` resolve the same paths.
 """
 from __future__ import annotations

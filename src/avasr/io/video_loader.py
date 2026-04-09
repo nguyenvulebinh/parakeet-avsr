@@ -14,7 +14,7 @@ from src.avasr.io.video_transform import VideoTransform
 
 LipCropMode = Literal["auto", "force", "skip"]
 
-# Must match ``FPS`` in ``src.avasr.pipeline.single`` and lip-crop assumptions.
+# Must match ``FPS`` in ``src.avasr.pipeline.inference`` and lip-crop assumptions.
 DEFAULT_VIDEO_FPS = 25.0
 
 
