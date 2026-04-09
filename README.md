@@ -50,6 +50,8 @@ python run_single.py examples/video.mp4 --model-id nguyenvulebinh/parakeet-avsr 
 
 For a service or script, construct [`AVSRInference`](src/avasr/pipeline/inference.py) once (loads AVSR, tokenizer, and lip models), then call [`transcribe`](src/avasr/pipeline/inference.py) per video. From another working directory, set `PYTHONPATH` to the repo root (e.g. `PYTHONPATH=/path/to/parakeet-avsr`) so `import src...` resolves.
 
+**Google Colab:** step-by-step notebook using the same API — [Parakeet AVASR inference (Colab)](https://colab.research.google.com/drive/13gY6uT7zxXaPw0FgSQB0L_wnxh8zWUB9?usp=sharing).
+
 ```python
 from pathlib import Path
 
@@ -57,7 +59,7 @@ import torch
 
 from src.avasr.pipeline.inference import AVSRInference, write_vtt
 
-repo_root = Path(__name__).resolve().parent  # or your project root
+repo_root = Path(__file__).resolve().parent  # or your project root
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 infer = AVSRInference(
