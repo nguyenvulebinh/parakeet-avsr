@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import io
 import sys
 from pathlib import Path
 from typing import Any, Optional, TextIO
@@ -160,25 +161,30 @@ def write_vtt(
     merge_utterance: bool = True,
     merge_gap_sec: float = 0.5,
     max_utterance_sec: float = 10.0,
-) -> None:
-    """Write WebVTT from word-level timestamps (see :func:`compute_word_timestamps`).
+) -> str:
+    """Build WebVTT from word-level timestamps (see :func:`compute_word_timestamps`).
 
-    If ``f`` is ``None`` (the default), writes to :data:`sys.stdout`.
+    Returns the full VTT document as a string. Also writes it to ``f`` when given,
+    or to :data:`sys.stdout` when ``f`` is ``None``.
 
     When ``merge_utterance`` is True, adjacent words are merged into one cue if the
     gap between them is at most ``merge_gap_sec`` (default 500 ms) and the cue span
     would not exceed ``max_utterance_sec`` (default 10 s).
     """
-    out = sys.stdout if f is None else f
-    out.write("WEBVTT\n\n")
+    buf = io.StringIO()
+    buf.write("WEBVTT\n\n")
     rows = _word_timestamps_to_sec_rows(word_timestamps, time_offset)
     if merge_utterance:
         cues = _merge_words_into_utterances(rows, merge_gap_sec, max_utterance_sec)
     else:
         cues = rows
     for text, start_sec, end_sec in cues:
-        out.write(f"{format_vtt_ts(start_sec)} --> {format_vtt_ts(end_sec)}\n")
-        out.write(f"{text}\n\n")
+        buf.write(f"{format_vtt_ts(start_sec)} --> {format_vtt_ts(end_sec)}\n")
+        buf.write(f"{text}\n\n")
+    vtt = buf.getvalue()
+    out = sys.stdout if f is None else f
+    out.write(vtt)
+    return vtt
 
 
 class AVSRInference:
