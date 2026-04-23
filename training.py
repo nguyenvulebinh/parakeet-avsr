@@ -285,7 +285,7 @@ def main(args):
     if not bool(args.custom_tokenizer):
         tok_path = cached_file(args.model_id, "tokenizer.model", cache_dir=args.cache_dir)
         tokenizer.load(tok_path)
-        model = AVASRForTranscription.from_pretrained("/mnt/data/workspace/baovd5/speech/parakeet-avsr/model-bin/avasr_en_freeze_vis_feat_v2/checkpoint-epoch-5-step-8000")
+        model = AVASRForTranscription.from_pretrained(args.model_id)
     else:
         # Load custom Vietnamese tokenizer and expand weights
         tokenizer.load(args.custom_tokenizer_path)
